@@ -321,7 +321,7 @@ namespace BinLogToSln
                 project.WriteLine("  </ItemGroup>");
 
                 project.WriteLine("</Project>");
-                if (!string.IsNullOrEmpty(invocation.OutputAssemblyPath))
+                if (!string.IsNullOrEmpty(invocation.OutputAssemblyPath) && File.Exists(invocation.OutputAssemblyPath))
                 {
                     string outputFilePath = Path.Join(projectDirectory, "bin", "Debug", "netcoreapp2.1",
                         Path.GetFileName(invocation.OutputAssemblyPath));
