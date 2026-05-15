@@ -295,18 +295,28 @@ namespace BinLogToSln
 
                 // Add generated files.
                 project.WriteLine("  <ItemGroup>");
+                int generatedIdx = 0;
                 foreach (var generatedFile in getGeneratedFiles())
                 {
-                    string filePath = generatedFile.FilePath;
-                    if (!File.Exists(filePath))
+                    try
                     {
-                        Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+                        // Write generated file content under the project directory
+                        // in the output, rather than at the original absolute path
+                        // from the PDB which may not be writable.
+                        string generatedRelPath = Path.Join("_generated", (generatedIdx++).ToString(), Path.GetFileName(generatedFile.FilePath));
+                        string outputFilePath = Path.Join(projectDirectory, generatedRelPath);
+                        Directory.CreateDirectory(Path.GetDirectoryName(outputFilePath));
                         var stream = generatedFile.Stream;
                         stream.Position = 0;
-                        using var fileStream = File.OpenWrite(filePath);
+                        using var fileStream = File.OpenWrite(outputFilePath);
                         stream.CopyTo(fileStream);
+
+                        project.WriteLine($"    <Compile Include=\"{generatedRelPath}\"/>");
                     }
-                    includeFile(filePath);
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"##vso[task.logissue type=warning;]Error writing generated file: {ex.Message}");
+                    }
                 }
                 project.WriteLine("  </ItemGroup>");
 
