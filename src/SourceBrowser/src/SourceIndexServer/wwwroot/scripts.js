@@ -182,6 +182,8 @@ function onPageLoaded() {
 
     top.name = "topFrame";
 
+    initPaneResizer();
+
     var query = document.location.search;
     if (query && query.slice(0, 3) == "?q=") {
         redirectLocation(top, "/#" + query.slice(1));
@@ -201,6 +203,82 @@ function onPageLoaded() {
     }
 
     processHash();
+}
+
+// Makes the divider between the side-by-side nav and content panes draggable (desktop layout
+// only). The nav pane width is persisted on `top` and in localStorage so it survives frame
+// reloads and return visits. The mobile single-pane layout has no splitter (it's display:none)
+// and must not inherit a fixed pixel width, so the width is cleared whenever that layout is
+// active and reapplied on return to the side-by-side layout.
+function initPaneResizer() {
+    var resizer = document.getElementById("paneResizer");
+    var navFrame = document.getElementById("n");
+    var container = document.getElementById("splitter");
+    if (!resizer || !navFrame || !container) {
+        return;
+    }
+
+    var MIN_WIDTH = 200;
+    var mobile = window.matchMedia(
+        "(max-width: 700px), (orientation: landscape) and (max-height: 500px) and (pointer: coarse)");
+
+    function storedWidth() {
+        var value = parseInt(localStorage.getItem("navPaneWidth"), 10);
+        return isNaN(value) ? 0 : value;
+    }
+
+    function clamp(width) {
+        var max = container.clientWidth - MIN_WIDTH;
+        if (max < MIN_WIDTH) {
+            max = MIN_WIDTH;
+        }
+        return Math.min(Math.max(width, MIN_WIDTH), max);
+    }
+
+    // In the mobile layout the panes stack full-width; a leftover pixel width would override
+    // that, so drop it there and restore the saved width when back to side-by-side.
+    function applyLayout() {
+        if (mobile.matches) {
+            navFrame.style.width = "";
+        } else if (storedWidth()) {
+            navFrame.style.width = clamp(storedWidth()) + "px";
+        }
+    }
+
+    resizer.addEventListener("pointerdown", function (e) {
+        if (mobile.matches) {
+            return;
+        }
+
+        e.preventDefault();
+        document.body.classList.add("resizingPanes");
+
+        // Track the move/up on the document rather than the 6px resizer: once the drag starts the
+        // cursor leaves the handle, and the .resizingPanes rule disables the iframes' pointer
+        // events so these still reach us here.
+        function onMove(ev) {
+            var width = clamp(ev.clientX - container.getBoundingClientRect().left);
+            navFrame.style.width = width + "px";
+        }
+
+        function onUp() {
+            document.body.classList.remove("resizingPanes");
+            document.removeEventListener("pointermove", onMove);
+            document.removeEventListener("pointerup", onUp);
+            localStorage.setItem("navPaneWidth", parseInt(navFrame.style.width, 10));
+        }
+
+        document.addEventListener("pointermove", onMove);
+        document.addEventListener("pointerup", onUp);
+    });
+
+    if (mobile.addEventListener) {
+        mobile.addEventListener("change", applyLayout);
+    } else if (mobile.addListener) {
+        mobile.addListener(applyLayout);
+    }
+
+    applyLayout();
 }
 
 function onHeaderLoad() {
@@ -250,6 +328,9 @@ function onHeaderLoad() {
 function onResultsLoad() {
     ensureSearchBox();
     initRepoFilter(function () { runSearch(); });
+
+    // The pinned-note height (sticky-header offset) depends on the pane width via wrapping.
+    window.addEventListener("resize", function () { updateGroupHeaderOffset(); });
 
     if (searchBox && searchBox.value && searchBox.value.length > 2) {
         runSearch();
@@ -803,6 +884,20 @@ function embedRepoFilterInNote(scope) {
 
     note.classList.add("hasFilter");
     note.appendChild(repoFilterElement);
+
+    updateGroupHeaderOffset(note);
+}
+
+// The top "N results found" note is pinned (position: sticky, top: 0). Sticky group headers must
+// sit just below it, so publish the note's rendered height as --groupHeaderTop for the CSS to use.
+// The height varies with the embedded filter dropdown and with wrapping, so recompute on resize.
+function updateGroupHeaderOffset(note) {
+    if (!note) {
+        note = document.querySelector("#symbols > .note");
+    }
+
+    var height = note ? note.getBoundingClientRect().height : 0;
+    document.documentElement.style.setProperty("--groupHeaderTop", Math.round(height) + "px");
 }
 
 // Hides/shows each project's subtree in the merged Solution Explorer (SolutionExplorer.html)
@@ -918,6 +1013,12 @@ function loadSearchResults(data) {
             // context, now that the note it was sitting in just got replaced wholesale above.
             if (typeof top.n.embedRepoFilterInNote === "function") {
                 top.n.embedRepoFilterInNote(container);
+            }
+
+            // Groups just got replaced, so re-measure the pinned note for the sticky-header offset
+            // (embedRepoFilterInNote only does this when a filter dropdown is present).
+            if (typeof top.n.updateGroupHeaderOffset === "function") {
+                top.n.updateGroupHeaderOffset();
             }
 
             if (searchBox && searchBox.value && searchBox.value.length > 2) {
@@ -1576,6 +1677,36 @@ function expandCollapseFolder(capturedFolder, capturedPlusMinus, capturedFolderI
             capturedPlusMinus.src = pathToIcons + "minus.png";
             if (capturedDiv.className != "projectCSInSolution" && capturedDiv.className != "projectVBInSolution") {
                 capturedFolderImage.src = pathToIcons + openFolderIcon;
+            }
+
+            // A project whose file subtree was deferred (see SolutionFinalizer.WriteProject) carries a
+            // data-src instead of inline children. Fetch and inject it on first expand, then wire the
+            // injected subtree the same way makeFoldersCollapsible does the initial document.
+            var deferredSrc = capturedFolder.getAttribute ? capturedFolder.getAttribute("data-src") : null;
+            if (deferredSrc && !capturedFolder.everExpanded) {
+                capturedFolder.everExpanded = true;
+                var initFn = capturedFolder.initialize;
+                capturedFolder.initialize = null;
+                fetch(deferredSrc)
+                    .then(function (r) { return r.ok ? r.text() : ""; })
+                    .then(function (html) {
+                        capturedFolder.innerHTML = html;
+                        var nested = capturedFolder.querySelectorAll(".folder");
+                        for (var j = 0; j < nested.length; j++) {
+                            nested[j].style.display = "none";
+                            nested[j].initialize = initFn;
+                        }
+                        if (initFn) {
+                            initFn(capturedFolder);
+                        }
+                        for (var k = 0; k < capturedFolder.children.length; k++) {
+                            if (capturedFolder.children[k].className === 'folder') {
+                                addImagesToFolder(capturedFolder.children[k], folderIcon, openFolderIcon, pathToIcons);
+                            }
+                        }
+                    });
+                capturedFolder.style.display = 'block';
+                return;
             }
 
             if (capturedFolder.initialize) {
